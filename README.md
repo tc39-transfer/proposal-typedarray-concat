@@ -1,50 +1,83 @@
-# template-for-proposals
+# TypedArray Concatenation
 
-A repository template for ECMAScript proposals.
+ECMAScript Proposal for TypedArray concatentation
 
-## Before creating a proposal
+This proposal is currently [stage 1](https://github.com/tc39/proposals/blob/master/README.md) of the [process](https://tc39.github.io/process-document/).
 
-Please ensure the following:
-  1. You have read the [process document](https://tc39.github.io/process-document/)
-  1. You have reviewed the [existing proposals](https://github.com/tc39/proposals/)
-  1. You are aware that your proposal requires being a member of TC39, or locating a TC39 delegate to “champion” your proposal
+## Problem
 
-## Create your proposal repo
+ECMAScript should provide a native method for concatenating TypedArrays that enables implementations to optimize through strategies that can avoid the current requirement of eagerly allocating and copying data into new buffers
 
-Follow these steps:
-  1. Click the green [“use this template”](https://github.com/tc39/template-for-proposals/generate) button in the repo header. (Note: Do not fork this repo in GitHub's web interface, as that will later prevent transfer into the TC39 organization)
-  1. Update ecmarkup and the biblio to the latest version: `npm install --save-dev ecmarkup@latest && npm install --save-dev --save-exact @tc39/ecma262-biblio@latest`.
-  1. Go to your repo settings page:
-      1. Under “General”, under “Features”, ensure “Issues” is checked, and disable “Wiki”, and “Projects” (unless you intend to use Projects)
-      1. Under “Pull Requests”, check “Always suggest updating pull request branches” and “automatically delete head branches”
-      1. Under the “Pages” section on the left sidebar, and set the source to “deploy from a branch”, select “gh-pages” in the branch dropdown, and then ensure that “Enforce HTTPS” is checked.
-      1. Under the “Actions” section on the left sidebar, under “General”, select “Read and write permissions” under “Workflow permissions” and click “Save”
-  1. [“How to write a good explainer”][explainer] explains how to make a good first impression.
+It is common for applications on the web (both browser and server side) to need to concatenate two or more TypedArray instances as part of a data pipeline. Unfortunately, the mechanisms available for concatenation are difficult to optimize for performance. All require additional allocations and copying at inopportune times in the application.
 
-      > Each TC39 proposal should have a `README.md` file which explains the purpose
-      > of the proposal and its shape at a high level.
-      >
-      > ...
-      >
-      > The rest of this page can be used as a template ...
+A common example is a `WritableStream` instance that collects writes up to a defined threshold before passing those on in a single coalesced chunk. Server-side applications have typically relied on Node.js' `Buffer.concat` API, while browser applications have relied on either browser-compatible polyfills of `Buffer` or `TypedArray.prototype.set`.
 
-      Your explainer can point readers to the `index.html` generated from `spec.emu`
-      via markdown like
+```js
+let buffers = [];
+let size = 0;
+new WritableStream({
+  write(chunk) {
+    buffers.push(chunk);
+    size += chunks.length;
+    if (buffer.byteLength >= 4096) {
+      // Not yet the actual proposed syntax... we have to determine that still
+      flushBuffer(concat(buffers, size));
+      buffers = [];
+      size = 0;
+    }
+  }
+});
 
-      ```markdown
-      You can browse the [ecmarkup output](https://ACCOUNT.github.io/PROJECT/)
-      or browse the [source](https://github.com/ACCOUNT/PROJECT/blob/HEAD/spec.emu).
-      ```
+function concat(buffers, size) {
+  const dest = new Uint8Array(size);
+  let offset = 0;
+  for (const buffer of buffers) {
+    dest.set(buffer, offset);
+    offset += buffer.length;
+  }
+}
+```
 
-      where *ACCOUNT* and *PROJECT* are the first two path elements in your project's Github URL.
-      For example, for github.com/**tc39**/**template-for-proposals**, *ACCOUNT* is “tc39”
-      and *PROJECT* is “template-for-proposals”.
+```js
+const buffer1 = Buffer.from('hello');
+const buffer2 = Buffer.from('world');
+const buffer3 = Buffer.concat([buffer1, buffer2]);
+```
 
+While these approaches work, they end up being difficult to optimize because they require potential expensive allocations and data copying at inopportune times while processing the information. The `TypedArray.prototype.set` method does provide an approach for concatenation that is workable, but the way the algorithm is defined, there is no allowance given for implementation-defined optimization.
 
-## Maintain your proposal repo
+## Proposal
 
-  1. Make your changes to `spec.emu` (ecmarkup uses HTML syntax, but is not HTML, so I strongly suggest not naming it “.html”)
-  1. Any commit that makes meaningful changes to the spec, should run `npm run build` to verify that the build will succeed and the output looks as expected.
-  1. Whenever you update `ecmarkup`, run `npm run build` to verify that the build will succeed and the output looks as expected.
+This proposal seeks to improve the current state by providing a mechanism that provides an optimizable concatenation path for TypedArrays within the language.
 
-  [explainer]: https://github.com/tc39/how-we-work/blob/HEAD/explainer.md
+As a stage 1 proposal, the exact mechanism has yet to be defined but the goal would be to achieve a model very similar to Node.js' `Buffer.concat`, where multiple input `TypedArray`s can be given and the implementation can determine the most optimum approach to concatenating those into a single returned `TypedArray` of the same type.
+
+```js
+const enc = new TextEncoder();
+const u8_1 = enc.encode('Hello ');
+const u8_2 = enc.encode('World!');
+const u8_3 = Uint8Array.concat([u8_1, u8_2]);
+```
+
+A key goal, if a reasonable approach to do so is found, would be to afford implementations the ability to determine the most optimal approach, and optimal timing, for performing the allocations and copies, but no specific optimization would be required.
+
+### Differences from `set`
+
+Per the current definition of `TypedArray.prototype.set` in the language specification, the user code is responsible for allocating the destination `TypedArray` in advance along with calculating and updating the offset at which each copied segment should go. Allocations can be expensive and the book keeping can be cumbersome, particularly when the are multiple input `TypedArrays`. The `set` algorithm is also written such that each element of the copied `TypedArray` is copied to the destination one element at a time, with no affordance given to allow the implementation to determine an alternative, more optimal copy strategy.
+
+```js
+let buffers = [];
+let size = 0;
+new WritableStream({
+  write(chunk) {
+    buffers.push(chunk);
+    size += chunks.length;
+    if (size >= 4096) {
+      // Not yet the actual proposed syntax... we have to determine that still
+      flushBuffer(Uint8Array.concat(buffers, size));
+      buffers = [];
+      size = 0;
+    }
+  }
+});
+```
